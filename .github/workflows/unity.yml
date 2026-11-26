@@ -1,0 +1,57 @@
+name: unity
+# Compiles the whole package (Runtime/Unity, Runtime/XR, Editor) and runs the EditMode tests inside Unity, headless, via GameCI.
+# Needs a Unity Personal licence in repo secrets (see docs/CI-SETUP.md). Without the secrets the job is SKIPPED, not failed.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      unityVersion:
+        description: Unity editor version (a GameCI image tag, e.g. 2022.3.62f1 or a 6000.0.x)
+        default: 2022.3.62f1
+jobs:
+  licence:
+    runs-on: ubuntu-latest
+    outputs:
+      has: ${{ steps.chk.outputs.has }}
+    steps:
+      - id: chk
+        env:
+          LIC: ${{ secrets.UNITY_LICENSE }}
+          EM: ${{ secrets.UNITY_EMAIL }}
+          PW: ${{ secrets.UNITY_PASSWORD }}
+        run: |
+          if [ -n "$LIC" ] && [ -n "$EM" ] && [ -n "$PW" ]; then echo "has=true" >> "$GITHUB_OUTPUT"; else echo "has=false" >> "$GITHUB_OUTPUT"; echo "::notice::Unity licence secrets not set: skipping the Unity job (docs/CI-SETUP.md)"; fi
+  editmode:
+    needs: licence
+    if: needs.licence.outputs.has == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk (the Unity image is several GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/cache@v4
+        with:
+          path: tests/UnityProject/Library
+          key: Library-${{ inputs.unityVersion || '2022.3.62f1' }}-${{ hashFiles('io.x3d.unity/**/*.cs', 'io.x3d.unity/**/*.asmdef', 'tests/UnityProject/Packages/manifest.json') }}
+          restore-keys: Library-${{ inputs.unityVersion || '2022.3.62f1' }}-
+      - uses: game-ci/unity-test-runner@v4
+        id: tests
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          projectPath: tests/UnityProject
+          unityVersion: ${{ inputs.unityVersion || '2022.3.62f1' }}
+          testMode: editmode
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          checkName: Unity EditMode results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unity-editmode-results
+          path: ${{ steps.tests.outputs.artifactsPath }}

@@ -1,0 +1,28 @@
+name: core
+# No Unity, no licence, no secrets: the pure-C# core tests and the x3d_mcp-gated live server. Runs on every push and PR.
+on:
+  push:
+  pull_request:
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '8.0.x' }
+      - name: Core tests (C# 9, the language level Unity compiles)
+        run: dotnet run -c Release --project tests/X3D.Core.Tests -- samples/scenes/hello-xr.x3d
+      - uses: actions/checkout@v4
+        with:
+          repository: hagopjay/x3d_mcp
+          ref: 4d433af670697ad09a59d11bf42f67618b83332b
+          path: x3d_mcp
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install lxml jsonschema
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Live server + x3d_mcp gate (8 checks)
+        env:
+          X3D_MCP_DIR: ${{ github.workspace }}/x3d_mcp
+        run: tools/test_live.sh
