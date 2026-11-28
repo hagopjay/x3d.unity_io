@@ -29,6 +29,84 @@ static class T
         return new[] { v[0] + w * tx + (y * tz - z * ty), v[1] + w * ty + (z * tx - x * tz), v[2] + w * tz + (x * ty - y * tx) };
     }
 
+    // Spring bones: the C# twin against the JavaScript golden trace (x3d.loom x3d.springbone tools/golden.mjs)
+    static double[] D(System.Text.Json.JsonElement e) { return e.EnumerateArray().Select(x => x.GetDouble()).ToArray(); }
+    static Affine Aff(System.Text.Json.JsonElement e) { return new Affine(D(e.GetProperty("L")), D(e.GetProperty("t"))); }
+    static double Num(System.Text.Json.JsonElement o, string k, double d) { return o.TryGetProperty(k, out var v) ? v.GetDouble() : d; }
+    static string Str(System.Text.Json.JsonElement o, string k, string d) { return o.TryGetProperty(k, out var v) ? v.GetString() : d; }
+    static double[][] Curve(System.Text.Json.JsonElement o, string k) { return o.TryGetProperty(k, out var v) ? v.EnumerateArray().Select(D).ToArray() : new double[0][]; }
+    static void SpringBones()
+    {
+        Console.WriteLine("spring bones (golden trace from springbone-core.js)");
+        string path = File.Exists("tests/X3D.Core.Tests/springbone-golden.json") ? "tests/X3D.Core.Tests/springbone-golden.json" : Path.Combine(AppContext.BaseDirectory, "springbone-golden.json");
+        if (!File.Exists(path)) path = "springbone-golden.json";
+        var g = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path)).RootElement;
+        var pj = g.GetProperty("params");
+        var P = new SpringParams
+        {
+            TimeMode = Str(pj, "timeMode", "FIXED"), UpdateRate = Num(pj, "updateRate", 60), SpringModel = Str(pj, "springModel", "POSITION"),
+            Damping = Num(pj, "damping", 0.1), Elasticity = Num(pj, "elasticity", 0.1), Stiffness = Num(pj, "stiffness", 0.1), Inert = Num(pj, "inert", 0),
+            Friction = Num(pj, "friction", 0), Radius = Num(pj, "radius", 0), AngleLimit = Num(pj, "angleLimit", 0), Stretch = Num(pj, "stretch", 0),
+            EndLength = Num(pj, "endLength", 0), Gravity = D(pj.GetProperty("gravity")), ForceUnits = Str(pj, "forceUnits", "PER_STEP"),
+            Force = D(pj.GetProperty("force")), Wind = D(pj.GetProperty("wind")), WindTurbulence = Num(pj, "windTurbulence", 0), WindFrequency = Num(pj, "windFrequency", 1),
+            Seed = (int)Num(pj, "seed", 1), BranchMode = Str(pj, "branchMode", "SKIP"), Weight = Num(pj, "weight", 1), ResetDistance = Num(pj, "resetDistance", 0),
+            GravityRestCompensation = pj.GetProperty("gravityRestCompensation").GetBoolean(),
+            DampingCurve = Curve(pj, "dampingCurve"), ElasticityCurve = Curve(pj, "elasticityCurve"), StiffnessCurve = Curve(pj, "stiffnessCurve"), RadiusCurve = Curve(pj, "radiusCurve"),
+        };
+        var trees = new List<SpringTreeDesc>();
+        foreach (var t in g.GetProperty("trees").EnumerateArray())
+        {
+            var td = new SpringTreeDesc();
+            foreach (var j in t.GetProperty("joints").EnumerateArray())
+                td.Joints.Add(new SpringJoint { Parent = j.GetProperty("parent").GetInt32(), EndOffset = j.TryGetProperty("endOffset", out var eo) ? D(eo) : null });
+            trees.Add(td);
+        }
+        var pose0 = g.GetProperty("pose0").EnumerateArray().Select(t => t.EnumerateArray().Select(f => new SpringJointPose
+        {
+            Translation = D(f.GetProperty("translation")), Center = D(f.GetProperty("center")), Rotation = D(f.GetProperty("rotation")),
+            Scale = D(f.GetProperty("scale")), ScaleOrientation = D(f.GetProperty("scaleOrientation")),
+        }).ToList()).ToList();
+        var capOff = D(g.GetProperty("capsuleFrameOffset"));
+        var checks = g.GetProperty("check").EnumerateArray().ToDictionary(c => c.GetProperty("frame").GetInt32(), c => c);
+        var chain = new SpringChain(trees, P);
+        int f = 0, hashes = 0; double worst = 0;
+        foreach (var fr in g.GetProperty("frames").EnumerateArray())
+        {
+            var pw = Aff(fr.GetProperty("parentWorld"));
+            var pose = pose0.Select(t => t.Select(p => p.Clone()).ToList()).ToList();
+            pose[0][1].Rotation = D(fr.GetProperty("rot1"));
+            var capW = new Affine(pw.L, SpringChain.ApplyPoint(pw, capOff));
+            var cs = new List<SpringCollider>();
+            foreach (var c in g.GetProperty("colliders").EnumerateArray())
+                cs.Add(new SpringCollider
+                {
+                    Shape = Str(c, "shape", "SPHERE"), Bound = Str(c, "bound", "OUTSIDE"), Direction = Str(c, "direction", "Y"),
+                    Center = D(c.GetProperty("center")), Axis = c.TryGetProperty("axis", out var ax) ? D(ax) : new double[] { 0, 0, 0 },
+                    Radius = Num(c, "radius", 0.5), Radius2 = Num(c, "radius2", 0), Height = Num(c, "height", 0),
+                    World = c.TryGetProperty("frame", out var _) ? capW : Affine.Identity,
+                });
+            var output = chain.Frame(fr.GetProperty("dt").GetDouble(), fr.GetProperty("time").GetDouble(),
+                new List<SpringTreeInput> { new SpringTreeInput { ParentWorld = pw, Pose = pose[0] }, new SpringTreeInput { ParentWorld = pw, Pose = pose[1] } }, pw, cs);
+            if (checks.TryGetValue(f, out var ck))
+            {
+                var pos = ck.GetProperty("positions").EnumerateArray().ToArray();
+                for (int ti = 0; ti < output.Trees.Count; ti++)
+                {
+                    var want = pos[ti].EnumerateArray().Select(D).ToArray();
+                    for (int i = 0; i < want.Length; i++) for (int k = 0; k < 3; k++) worst = Math.Max(worst, Math.Abs(output.Trees[ti].Positions[i][k] - want[i][k]));
+                }
+                if (chain.StateHash() == ck.GetProperty("hash").GetString()) hashes++;
+            }
+            f++;
+        }
+        Ok(worst <= 1e-12, "golden trace: positions within 1e-12 m of the JavaScript core (worst " + worst.ToString("E2") + ")");
+        Ok(hashes == checks.Count, "golden trace: " + hashes + " of " + checks.Count + " state hashes equal");
+        Ok(chain.Steps == g.GetProperty("steps").GetInt32(), "golden trace: same step count (" + chain.Steps + ")");
+        SpringChain.TuningFromPhysical(2, 0.1, 60, "FORCE", out double d, out double e);
+        var back = SpringChain.PhysicalFromTuning(d, e, 60, "FORCE");
+        Ok(Near(back[0], 2, 1e-12) && Near(back[1], 0.1, 1e-12), "physical tuning round trip (2 Hz, 0.1)");
+    }
+
     static int Main(string[] args)
     {
         Console.WriteLine("parser");
@@ -127,6 +205,7 @@ static class T
         Ok(rg.Gaps.Contains("node:Extrusion") && rg.Gaps.Contains("node:Script") && rg.Gaps.Contains("geometry:Extrusion"), "unsupported nodes named, not dropped");
         Console.WriteLine("hello-xr: " + tri + " triangles, " + pts + " points, nodes " + string.Join(",", rc.NodeCounts.Select(k => k.Key + "=" + k.Value)));
 
+        SpringBones();
         Console.WriteLine("\n" + pass + " passed, " + fail + " failed");
         return fail == 0 ? 0 : 1;
     }

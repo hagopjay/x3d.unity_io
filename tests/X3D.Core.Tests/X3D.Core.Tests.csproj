@@ -10,5 +10,6 @@
   <ItemGroup>
     <Compile Include="../../io.x3d.unity/Runtime/Core/*.cs" />
     <Compile Include="Program.cs" />
+    <None Include="springbone-golden.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
